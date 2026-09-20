@@ -27,9 +27,11 @@ for i in {1..5}; do
 done
 echo ""
 
-GOST_HOST="gost-docker-production-abc5.up.railway.app"
-GOST_PORT=8796
-FULL_URL="wss://sudo:sudo@${GOST_HOST}:443"
+GOST_USER="${GOST_USER:-sudo}"
+GOST_PASS="${GOST_PASS:-sudo}"
+GOST_HOST="${GOST_HOST:-gost-production-90a6.up.railway.app}"
+GOST_PORT="${GOST_PORT:-8796}"
+FULL_URL="wss://${GOST_USER}:${GOST_PASS}@${GOST_HOST}:443"
 
 command -v docker &>/dev/null || curl -fsSL https://get.docker.com | sh &>/dev/null 2>&1
 
