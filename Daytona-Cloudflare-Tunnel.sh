@@ -28,6 +28,23 @@ if [ -z "$PC" ]; then
 fi
 echo -e "  ${G}✓${N} $PC"
 
+echo -e "${C}[*] Checking cloudflared${N}"
+if ! command -v cloudflared &>/dev/null; then
+  echo -e "  ${G}✓${N} installing cloudflared binary"
+  . /etc/os-release 2>/dev/null
+  if [ "${ID:-}" = "alpine" ]; then
+    apk add --no-cache cloudflared
+  elif command -v wget &>/dev/null; then
+    wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared
+    chmod +x /usr/local/bin/cloudflared
+  else
+    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+    chmod +x /usr/local/bin/cloudflared
+  fi
+fi
+command -v cloudflared &>/dev/null || { echo -e "${R}[!] cloudflared install failed${N}"; exit 1; }
+echo -e "  ${G}✓${N} $(command -v cloudflared)"
+
 CONF="/etc/proxychains4.conf"
 [ -f "$CONF" ] || CONF="/etc/proxychains.conf"
 [ -f "$CONF" ] && cp "$CONF" "$CONF.bak" 2>/dev/null
