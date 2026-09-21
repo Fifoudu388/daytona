@@ -14,6 +14,39 @@ PROXY="127.0.0.1:8796"
 PROXY_IP="${PROXY%:*}"
 PROXY_PORT="${PROXY##*:}"
 REDSOCKS_PORT="${REDSOCKS_PORT:-12345}"
+PIDFILE="/var/run/cloudflared.pid"
+LOGFILE="/var/log/cloudflared.log"
+
+cleanup() {
+  echo -e "${N}\n${C}[*] Cleaning up cloudflared / iptables / redsocks${N}"
+  if [ -f "$PIDFILE" ]; then
+    kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+  fi
+  pkill -x cloudflared 2>/dev/null
+  iptables -t nat -D OUTPUT -p tcp --dport 7844 -j REDSOCKS 2>/dev/null
+  iptables -t nat -F REDSOCKS 2>/dev/null
+  iptables -t nat -X REDSOCKS 2>/dev/null
+  pkill -x redsocks 2>/dev/null
+}
+
+if [ "${1:-}" = "stop" ]; then
+  cleanup
+  echo -e "  ${G}✓${N} stopped"
+  exit 0
+fi
+
+BG=0
+ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--bg" ]; then BG=1; else ARGS+=("$arg"); fi
+done
+set -- "${ARGS[@]}"
+
+if [ "$BG" -eq 1 ] && [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo -e "  ${Y}[!] cloudflared already running (pid $(cat "$PIDFILE"))${N}"
+  exit 1
+fi
 
 command -v iptables &>/dev/null || { echo -e "${R}[!] iptables not available${N}"; exit 1; }
 
@@ -80,15 +113,16 @@ pkill -x redsocks 2>/dev/null
 redsocks -c /etc/redsocks.conf
 sleep 1
 
-cleanup() {
-  echo -e "${N}\n${C}[*] Cleaning up iptables rules${N}"
-  iptables -t nat -D OUTPUT -p tcp --dport 7844 -j REDSOCKS 2>/dev/null
-  iptables -t nat -F REDSOCKS
-  iptables -t nat -X REDSOCKS 2>/dev/null
-  pkill -x redsocks 2>/dev/null
-}
-trap cleanup EXIT INT TERM
-
 echo -e "${C}[*] Starting cloudflared over proxy (http2, transparent)${N}"
-echo -e "  ${W}Args: $*${N}"
-cloudflared tunnel --protocol http2 "$@"
+
+if [ "$BG" -eq 1 ]; then
+  echo -e "  ${W}Args: $*${N}"
+  nohup cloudflared tunnel --protocol http2 "$@" >>"$LOGFILE" 2>&1 &
+  echo $! > "$PIDFILE"
+  echo -e "  ${G}✓${N} started in background (pid $! , log: $LOGFILE)"
+  echo -e "  ${W}stop: ./Daytona-Cloudflare-Tunnel.sh${N} ${C}stop${N}"
+else
+  echo -e "  ${W}Args: $*${N}"
+  trap cleanup EXIT INT TERM
+  cloudflared tunnel --protocol http2 "$@"
+fi
