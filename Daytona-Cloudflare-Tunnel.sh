@@ -23,7 +23,6 @@ cleanup() {
     kill "$(cat "$PIDFILE")" 2>/dev/null
     rm -f "$PIDFILE"
   fi
-  pkill -x cloudflared 2>/dev/null
   iptables -t nat -D OUTPUT -p tcp --dport 7844 -j REDSOCKS 2>/dev/null
   iptables -t nat -F REDSOCKS 2>/dev/null
   iptables -t nat -X REDSOCKS 2>/dev/null
