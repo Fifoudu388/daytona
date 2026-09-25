@@ -39,7 +39,7 @@ GOST_HOST="${GOST_HOST:-gost-production-90a6.up.railway.app}"
 GOST_PORT="${GOST_PORT:-8796}"
 FULL_URL="wss://${GOST_USER}:${GOST_PASS}@${GOST_HOST}:443"
 
-# 1) Proxy config files (profile.d + apt)
+# 1) Proxy config files (written now, sourced only once gost is up)
 cat > /etc/profile.d/daytona-net.sh << EOF
 export HTTP_PROXY=http://127.0.0.1:${GOST_PORT}
 export HTTPS_PROXY=http://127.0.0.1:${GOST_PORT}
@@ -56,16 +56,55 @@ Acquire::http::Proxy "http://127.0.0.1:${GOST_PORT}";
 Acquire::https::Proxy "http://127.0.0.1:${GOST_PORT}";
 EOF
 
-# 2) Source proxy vars
-export HTTP_PROXY="http://127.0.0.1:${GOST_PORT}"
-export HTTPS_PROXY="http://127.0.0.1:${GOST_PORT}"
-export http_proxy="http://127.0.0.1:${GOST_PORT}"
-export https_proxy="http://127.0.0.1:${GOST_PORT}"
-export NO_PROXY="localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.debian.org,archive.ubuntu.com,security.ubuntu.com,ppas.launchpadcontent.net"
-export no_proxy="localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.debian.org,archive.ubuntu.com,security.ubuntu.com,ppas.launchpadcontent.net"
-source /etc/profile.d/daytona-net.sh
+# 2) Install docker (proxy is not up yet -> bypass it for this download)
+if ! command -v docker &>/dev/null; then
+  echo -e "\033[1;36m[*] Installing docker\033[0m"
+  env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+    curl -fsSL https://get.docker.com | sh &>/dev/null 2>&1
+  command -v docker &>/dev/null || echo -e "\033[1;31m[!] docker install failed\033[0m"
+fi
 
-# 3) apt update/install
+# 3) Start dockerd, wait for readiness (timeout 30s)
+echo -e "\033[1;36m[*] Starting dockerd\033[0m"
+if ! pgrep -x dockerd &>/dev/null; then
+  dockerd &>/dev/null 2>&1 &
+fi
+for i in $(seq 1 30); do
+  docker info &>/dev/null 2>&1 && break
+  sleep 1
+done
+docker info &>/dev/null 2>&1 || echo -e "\033[1;31m[!] dockerd not ready after 30s\033[0m"
+
+# 4) Run gost bridge (socks5) - NOW the proxy goes live
+echo -e "\033[1;36m[*] Starting gost proxy (socks5)\033[0m"
+docker rm -f gost-bridge &>/dev/null 2>&1
+docker pull ginuerzh/gost:latest &>/dev/null 2>&1 || echo -e "\033[1;31m[!] docker pull ginuerzh/gost failed\033[0m"
+docker run -d --net=host --restart unless-stopped \
+  --name gost-bridge \
+  ginuerzh/gost:latest \
+  -L=socks5://:${GOST_PORT} \
+  -F="$FULL_URL" &>/dev/null 2>&1 || echo -e "\033[1;31m[!] docker run gost-bridge failed\033[0m"
+
+# Wait for the socks5 listener, then source the proxy
+for i in $(seq 1 30); do
+  (exec 3<>/dev/tcp/127.0.0.1/${GOST_PORT}) 2>/dev/null && break
+  sleep 1
+done
+if ! (exec 3<>/dev/tcp/127.0.0.1/${GOST_PORT}) 2>/dev/null; then
+  echo -e "\033[1;31m[!] gost proxy not listening on :${GOST_PORT}\033[0m"
+else
+  echo -e "\033[1;36m[*] Proxy is up on 127.0.0.1:${GOST_PORT}\033[0m"
+  source /etc/profile.d/daytona-net.sh
+  export HTTP_PROXY="http://127.0.0.1:${GOST_PORT}"
+  export HTTPS_PROXY="http://127.0.0.1:${GOST_PORT}"
+  export http_proxy="http://127.0.0.1:${GOST_PORT}"
+  export https_proxy="http://127.0.0.1:${GOST_PORT}"
+  export NO_PROXY="localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.debian.org,archive.ubuntu.com,security.ubuntu.com,ppas.launchpadcontent.net"
+  export no_proxy="localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.debian.org,archive.ubuntu.com,security.ubuntu.com,ppas.launchpadcontent.net"
+fi
+
+# 5) apt update/install through the proxy
+echo -e "\033[1;36m[*] Running apt via proxy\033[0m"
 apt update -y &>/dev/null 2>&1 || echo -e "\033[1;31m[!] apt update failed\033[0m"
 apt install -y qemu-system cloud-image-utils wget lsof curl bash &>/dev/null 2>&1 || echo -e "\033[1;31m[!] apt install failed\033[0m"
 
@@ -80,26 +119,8 @@ exec /usr/bin/qemu-system-x86_64 "${args[@]}"
 QWRAP
 chmod +x /usr/local/bin/qemu-system-x86_64
 
-# 4) docker + gost (socks5)
-command -v docker &>/dev/null || curl -fsSL https://get.docker.com | sh &>/dev/null 2>&1
-
-dockerd &>/dev/null 2>&1 &
-for i in $(seq 1 30); do
-  docker info &>/dev/null 2>&1 && break
-  sleep 1
-done
-docker info &>/dev/null 2>&1 || echo -e "\033[1;31m[!] dockerd not ready after 30s\033[0m"
-
-docker rm -f gost-bridge &>/dev/null 2>&1
-docker pull ginuerzh/gost:latest &>/dev/null 2>&1 || echo -e "\033[1;31m[!] docker pull ginuerzh/gost failed\033[0m"
-docker run -d --net=host --restart unless-stopped \
-  --name gost-bridge \
-  ginuerzh/gost:latest \
-  -L=socks5://:${GOST_PORT} \
-  -F="$FULL_URL" &>/dev/null 2>&1 || echo -e "\033[1;31m[!] docker run gost-bridge failed\033[0m"
-sleep 2
-
-# 5) /etc/environment merge (keep existing content e.g. PATH)
+# 6) /etc/environment merge (keep existing content e.g. PATH)
+echo -e "\033[1;36m[*] Merging /etc/environment\033[0m"
 touch /etc/environment
 sed -i -e '/^HTTP_PROXY=/d' -e '/^HTTPS_PROXY=/d' -e '/^http_proxy=/d' -e '/^https_proxy=/d' -e '/^NO_PROXY=/d' -e '/^no_proxy=/d' /etc/environment
 cat >> /etc/environment << EOF
@@ -111,15 +132,23 @@ NO_PROXY=localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.deb
 no_proxy=localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.debian.org,archive.ubuntu.com,security.ubuntu.com,ppas.launchpadcontent.net
 EOF
 
+# 7) sudoers proxy (validate, remove if invalid)
+echo -e "\033[1;36m[*] Configuring sudoers proxy\033[0m"
+mkdir -p /etc/sudoers.d
 cat > /etc/sudoers.d/proxy << 'EOFP'
 Defaults env_keep += "HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy"
 EOFP
 chmod 440 /etc/sudoers.d/proxy
-if ! visudo -cf /etc/sudoers.d/proxy &>/dev/null; then
-  rm -f /etc/sudoers.d/proxy
-  echo -e "\033[1;31m[!] invalid sudoers file removed\033[0m"
+if command -v visudo &>/dev/null; then
+  if ! visudo -cf /etc/sudoers.d/proxy &>/dev/null; then
+    rm -f /etc/sudoers.d/proxy
+    echo -e "\033[1;31m[!] invalid sudoers file removed\033[0m"
+  fi
+else
+  echo -e "\033[1;33m[!] visudo not found, sudoers left as-is\033[0m"
 fi
 
+# 8) Shell configs
 for rc in /etc/bash.bashrc /etc/skel/.bashrc /root/.bashrc; do
     if [ -f "$rc" ]; then
         grep -q "daytona-net.sh" "$rc" 2>/dev/null || echo "source /etc/profile.d/daytona-net.sh 2>/dev/null" >> "$rc"
@@ -147,6 +176,7 @@ set -gx NO_PROXY localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snap
 set -gx no_proxy localhost,127.0.0.1,::1,deb.debian.org,security.debian.org,snapshot.debian.org,archive.ubuntu.com,security.ubuntu.com,ppas.launchpadcontent.net
 FISHCONF
 
+# 9) rc.local to persist across reboots
 if [ -f /etc/rc.local ]; then
   sed -i '/gost-bridge/d; /dockerd/d' /etc/rc.local &>/dev/null
 else
